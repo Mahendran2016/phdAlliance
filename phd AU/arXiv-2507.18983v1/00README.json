@@ -1,0 +1,15 @@
+{
+   "sources" : [
+      {
+         "usage" : "toplevel",
+         "filename" : "conference_101719.tex"
+      },
+      {
+         "usage" : "ignore",
+         "filename" : "refs.bib"
+      }
+   ],
+   "process" : {
+      "compiler" : "pdflatex"
+   }
+}
