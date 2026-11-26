@@ -21,6 +21,39 @@ FEATURE_COLUMNS: tuple[str, ...] = (
     "idx_vol_21",
 )
 
+MACRO_FEATURE_COLUMNS: tuple[str, ...] = (
+    "usdinr_ret",
+    "india_vix_z",
+    "us_vix_z",
+    "gold_ret",
+    "brent_ret",
+    "sp500_ret",
+    "dxy_ret",
+    "us10y_chg",
+    "repo_rate",
+    "cpi_yoy",
+)
+
+
+def feature_columns(use_macro: bool = False) -> list[str]:
+    base = list(FEATURE_COLUMNS)
+    return base + list(MACRO_FEATURE_COLUMNS) if use_macro else base
+
+
+def attach_macro_features(panel: pd.DataFrame, macro: pd.DataFrame) -> pd.DataFrame:
+    """Left-join macro columns on ``date`` (values known at that session close)."""
+    if macro.empty:
+        return panel
+    macro = macro.copy()
+    macro.index = pd.to_datetime(macro.index).tz_localize(None).normalize()
+    lookup = macro.reset_index(names="date")
+    lookup["date"] = pd.to_datetime(lookup["date"]).dt.normalize()
+    merged = panel.merge(lookup, on="date", how="left", suffixes=("", "_macro"))
+    for col in MACRO_FEATURE_COLUMNS:
+        if col not in merged.columns:
+            merged[col] = np.nan
+    return merged
+
 
 def rsi(close: pd.Series, window: int = 14) -> pd.Series:
     delta = close.diff()
@@ -56,7 +89,12 @@ def _stock_frame(close: pd.Series, volume: pd.Series, ticker: str) -> pd.DataFra
     return frame
 
 
-def build_panel(close: pd.DataFrame, volume: pd.DataFrame, index_close: pd.Series) -> pd.DataFrame:
+def build_panel(
+    close: pd.DataFrame,
+    volume: pd.DataFrame,
+    index_close: pd.Series,
+    macro: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     index_close = index_close.dropna().sort_index()
     index_ret = index_close.pct_change()
     index_vol = index_ret.rolling(21).std()
@@ -73,8 +111,11 @@ def build_panel(close: pd.DataFrame, volume: pd.DataFrame, index_close: pd.Serie
     if not frames:
         raise RuntimeError("No constituent had enough history to build features")
     panel = pd.concat(frames, ignore_index=True)
+    if macro is not None:
+        panel = attach_macro_features(panel, macro)
     panel = panel.replace([np.inf, -np.inf], np.nan)
-    panel = panel.dropna(subset=list(FEATURE_COLUMNS) + ["target"]).copy()
+    required = list(FEATURE_COLUMNS) + (list(MACRO_FEATURE_COLUMNS) if macro is not None else []) + ["target"]
+    panel = panel.dropna(subset=required).copy()
     panel["date"] = pd.to_datetime(panel["date"]).dt.tz_localize(None).dt.normalize()
     return panel.sort_values(["date", "ticker"]).reset_index(drop=True)
 

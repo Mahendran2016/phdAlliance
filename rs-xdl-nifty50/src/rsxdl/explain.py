@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from scipy import stats
 from xgboost import DMatrix
 
 
@@ -60,3 +61,63 @@ def regime_conditioned_shap(
     if report.empty:
         return report
     return report.sort_values(["slice", "rank"]).reset_index(drop=True)
+
+
+def kruskal_wallis_shap(
+    models: dict,
+    test: pd.DataFrame,
+    feature_columns: list[str],
+    max_rows: int = 800,
+    seed: int = 42,
+    min_per_regime: int = 8,
+) -> pd.DataFrame:
+    """Test whether per-observation |SHAP| differs across market regimes (feature-wise).
+
+    Uses the regime-specific booster when present; otherwise the pooled model.
+    """
+    if test.empty:
+        return pd.DataFrame(columns=["feature", "H_stat", "p_value", "significant"])
+
+    sample = test
+    if len(sample) > max_rows:
+        sample = sample.sample(max_rows, random_state=seed)
+
+    per_feature: dict[str, list[np.ndarray]] = {name: [] for name in feature_columns}
+    pooled = models["pooled"]
+    for regime in sorted(int(r) for r in sample["regime"].dropna().unique()):
+        subset = sample[sample["regime"] == regime]
+        if len(subset) < min_per_regime:
+            continue
+        model = models.get(regime, pooled)
+        values = tree_shap(model, subset, feature_columns)
+        for j, name in enumerate(feature_columns):
+            per_feature[name].append(np.abs(values[:, j]))
+
+    rows: list[dict] = []
+    for feature, groups in per_feature.items():
+        groups = [g for g in groups if len(g) >= min_per_regime]
+        if len(groups) < 2:
+            rows.append(
+                {
+                    "feature": feature,
+                    "H_stat": float("nan"),
+                    "p_value": float("nan"),
+                    "significant": False,
+                    "n_groups": len(groups),
+                }
+            )
+            continue
+        stat, pvalue = stats.kruskal(*groups)
+        rows.append(
+            {
+                "feature": feature,
+                "H_stat": float(stat),
+                "p_value": float(pvalue),
+                "significant": bool(pvalue < 0.05),
+                "n_groups": len(groups),
+            }
+        )
+    report = pd.DataFrame(rows)
+    if report.empty:
+        return report
+    return report.sort_values("p_value").reset_index(drop=True)

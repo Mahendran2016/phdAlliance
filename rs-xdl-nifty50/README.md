@@ -1,5 +1,7 @@
 # RS-XDL for the Nifty 50
 
+**Primary PhD implementation** in this workspace: use `rs-xdl-nifty50` for empirical work, replication, and thesis chapters. The older `rs_xdl_final-main` tree is a figure/table snapshot (global HMM); the `rsxdl/` folder is an early scaffold.
+
 Regime-Switching Explainable Deep Learning for Indian large-cap equities.
 
 The daily Nifty index is split into bear, neutral, and bull states with a three-state Gaussian hidden Markov model. A separate gradient-boosted tree is fit inside each state, and tree SHAP is averaged inside each state (RC-SHAP) so feature rankings can change with the regime. A small LSTM takes the same features plus a regime one-hot and is scored on the same held-out sessions.
@@ -32,6 +34,19 @@ Trees only, if PyTorch is not needed:
 
 ```bash
 rsxdl --quick --no-lstm
+
+**PhD full run** (walk-forward robustness + hold-out SHAP/portfolio + figures):
+
+```bash
+rsxdl --start 2019-01-01 --complete --no-lstm
+rsxdl --start 2019-01-01 --complete --macro --no-lstm
+```
+
+Walk-forward only (no hold-out tables):
+
+```bash
+rsxdl --start 2019-01-01 --walk-forward --walk-forward-only --no-lstm
+```
 ```
 
 Outputs land in `artifacts/`:
@@ -40,6 +55,10 @@ Outputs land in `artifacts/`:
 | --- | --- |
 | `metrics.json` | RMSE, R², directional accuracy, Sharpe, Diebold-Mariano |
 | `rc_shap.csv` | Mean SHAP by regime |
+| `kruskal_wallis_shap.csv` | Per-feature Kruskal–Wallis on \|SHAP\| across regimes |
+| `walk_forward_folds.csv` | Per-fold metrics when `--walk-forward` is set |
+| `walk_forward_metrics.json` | Mean/std RMSE and directional accuracy across folds |
+| `figures/` | PNGs when `--figures` or `--complete` (WF RMSE, RC-SHAP heatmap, portfolio, KW) |
 | `regimes.csv` | Filtered state of the Nifty index |
 | `regimes.png` | Index level coloured by state |
 | `predictions.csv` | Test-set forecasts |

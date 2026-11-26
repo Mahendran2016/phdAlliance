@@ -14,10 +14,11 @@ import numpy as np
 import pandas as pd
 
 from rsxdl.evaluate import diebold_mariano, regression_metrics, sharpe_ratio, top_n_portfolio
-from rsxdl.explain import regime_conditioned_shap
-from rsxdl.features import FEATURE_COLUMNS, build_panel, index_feature_frame
+from rsxdl.explain import kruskal_wallis_shap, regime_conditioned_shap
+from rsxdl.features import build_panel, feature_columns, index_feature_frame
 from rsxdl.models import predict_regime, train_lstm, train_regime_models
 from rsxdl.regimes import fit_regimes
+from rsxdl.walkforward import run_walk_forward
 
 
 @dataclass
@@ -40,6 +41,19 @@ class RunConfig:
     lstm_epochs: int = 8
     lstm_lookback: int = 20
     seed: int = 42
+    use_macro: bool = False
+    walk_forward: bool = False
+    walk_forward_folds: int = 5
+    walk_forward_min_train_frac: float = 0.6
+    walk_forward_holdout: bool = True
+    figures: bool = False
+
+    def complete(self) -> "RunConfig":
+        """Walk-forward, then hold-out SHAP/portfolio, then figures."""
+        self.walk_forward = True
+        self.walk_forward_holdout = True
+        self.figures = True
+        return self
 
     def quick(self) -> "RunConfig":
         self.start = "2023-01-01"
@@ -91,16 +105,26 @@ def _plot_regimes(index_close: pd.Series, regimes: pd.Series, path: Path) -> Non
     plt.close(fig)
 
 
-def run_from_frames(
-    close: pd.DataFrame,
-    volume: pd.DataFrame,
+def _macro_frame(index_close: pd.Series, config: RunConfig) -> pd.DataFrame | None:
+    if not config.use_macro:
+        return None
+    from rsxdl.macro import load_macro_panel
+
+    return load_macro_panel(
+        index_close.index,
+        start=config.start,
+        end=config.end,
+        cache_dir=config.cache_dir,
+    )
+
+
+def _run_holdout(
+    panel: pd.DataFrame,
     index_close: pd.Series,
-    config: RunConfig | None = None,
+    features: list[str],
+    config: RunConfig,
+    output: Path,
 ) -> dict:
-    config = config or RunConfig()
-    output = Path(config.output_dir)
-    output.mkdir(parents=True, exist_ok=True)
-    panel = build_panel(close, volume, index_close)
     train_dates, val_dates, test_dates = chronological_split(panel["date"], config.val_frac, config.test_frac)
     index_features = index_feature_frame(index_close)
     regimes, regime_method = fit_regimes(
@@ -121,7 +145,6 @@ def run_from_frames(
     if train.empty or test.empty:
         raise RuntimeError("The date split produced an empty train or test panel")
 
-    features = list(FEATURE_COLUMNS)
     models = train_regime_models(
         train,
         features,
@@ -154,10 +177,19 @@ def run_from_frames(
         "test_start": str(pd.Timestamp(min(test_dates)).date()),
         "regime_method": regime_method,
         "regime_counts": {str(k): int(v) for k, v in panel["regime"].value_counts().sort_index().items()},
+        "use_macro": config.use_macro,
+        "n_features": len(features),
     }
 
     shap_table = regime_conditioned_shap(models, test, features, max_rows=config.shap_rows, seed=config.seed)
     shap_table.to_csv(output / "rc_shap.csv", index=False)
+    kw_table = kruskal_wallis_shap(models, test, features, max_rows=config.shap_rows, seed=config.seed)
+    kw_table.to_csv(output / "kruskal_wallis_shap.csv", index=False)
+    n_sig = int(kw_table["significant"].sum()) if not kw_table.empty and "significant" in kw_table.columns else 0
+    metrics["rc_shap"] = {
+        "kruskal_wallis_significant_features": n_sig,
+        "kruskal_wallis_features_tested": int(len(kw_table)),
+    }
     book.to_csv(output / "portfolio.csv", index=False)
     regimes.rename("regime").to_csv(output / "regimes.csv", index_label="date")
     predictions = test[["date", "ticker", "regime", "target"]].copy()
@@ -189,7 +221,36 @@ def run_from_frames(
 
     predictions.to_csv(output / "predictions.csv", index=False)
     _plot_regimes(index_close, regimes, output / "regimes.png")
-    (output / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    return metrics
+
+
+def run_from_frames(
+    close: pd.DataFrame,
+    volume: pd.DataFrame,
+    index_close: pd.Series,
+    config: RunConfig | None = None,
+) -> dict:
+    config = config or RunConfig()
+    output = Path(config.output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    panel = build_panel(close, volume, index_close, macro=_macro_frame(index_close, config))
+    features = feature_columns(config.use_macro)
+
+    metrics: dict = {"sample": {"rows": int(len(panel)), "use_macro": config.use_macro}}
+
+    if config.walk_forward:
+        metrics["walk_forward"] = run_walk_forward(panel, index_close, config, output=output)
+
+    run_holdout = (not config.walk_forward) or config.walk_forward_holdout
+    if run_holdout:
+        metrics.update(_run_holdout(panel, index_close, features, config, output))
+
+    if config.figures:
+        from rsxdl.figures import write_figures
+
+        metrics["figures_written"] = write_figures(output)
+
+    (output / "metrics.json").write_text(json.dumps(metrics, indent=2, default=str), encoding="utf-8")
     return metrics
 
 

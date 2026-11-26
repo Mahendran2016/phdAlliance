@@ -5,7 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from rsxdl.features import build_panel
+from rsxdl.features import FEATURE_COLUMNS, MACRO_FEATURE_COLUMNS, build_panel, feature_columns
+from rsxdl.walkforward import run_walk_forward, walk_forward_date_folds
 from rsxdl.pipeline import RunConfig, run_from_frames
 from rsxdl.regimes import _order_states, forward_filter
 
@@ -77,7 +78,76 @@ def test_synthetic_nifty_run_writes_metrics(tmp_path):
     metrics = run_from_frames(close, volume, index, config)
     assert "rmse" in metrics["regime_switching"]
     assert (tmp_path / "rc_shap.csv").exists()
+    assert (tmp_path / "kruskal_wallis_shap.csv").exists()
     assert (tmp_path / "metrics.json").exists()
     shap = pd.read_csv(tmp_path / "rc_shap.csv")
     assert {"slice", "feature", "mean_shap", "rank"}.issubset(shap.columns)
     assert shap["slice"].str.startswith("regime_").any()
+    assert "rc_shap" in metrics
+
+
+def test_kruskal_wallis_has_one_row_per_feature():
+    from rsxdl.explain import kruskal_wallis_shap
+    from rsxdl.features import FEATURE_COLUMNS, build_panel
+    from rsxdl.models import train_regime_models
+
+    close, volume, index = _prices(n=200, names=("AAA.NS", "BBB.NS"))
+    panel = build_panel(close, volume, index)
+    panel["regime"] = (panel["date"].dt.dayofyear % 3).astype(int)
+    train = panel.iloc[: int(len(panel) * 0.7)].copy()
+    test = panel.iloc[int(len(panel) * 0.7) :].copy()
+    features = list(FEATURE_COLUMNS)
+    models = train_regime_models(train, features, n_estimators=30, min_rows=30, seed=1)
+    kw = kruskal_wallis_shap(models, test, features, max_rows=120, seed=1, min_per_regime=5)
+    assert len(kw) == len(features)
+    assert "p_value" in kw.columns
+
+
+def test_macro_join_preserves_base_features():
+    close, volume, index = _prices(n=80, names=("AAA.NS",))
+    macro = pd.DataFrame(
+        {col: 0.0 for col in MACRO_FEATURE_COLUMNS},
+        index=index.index,
+    )
+    panel = build_panel(close, volume, index, macro=macro)
+    assert len(feature_columns(True)) == len(FEATURE_COLUMNS) + len(MACRO_FEATURE_COLUMNS)
+    assert panel[list(MACRO_FEATURE_COLUMNS)].notna().all(axis=None)
+
+
+def test_walk_forward_on_synthetic_panel(tmp_path):
+    close, volume, index = _prices(n=420)
+    panel = build_panel(close, volume, index)
+    assert len(walk_forward_date_folds(panel["date"], n_folds=3, min_train_frac=0.6)) >= 2
+    config = RunConfig(
+        output_dir=str(tmp_path),
+        n_estimators=25,
+        hmm_iter=15,
+        min_regime_rows=40,
+        walk_forward=True,
+        walk_forward_folds=3,
+        walk_forward_min_train_frac=0.6,
+        lstm=False,
+    )
+    metrics = run_walk_forward(panel, index, config, output=tmp_path)
+    assert metrics["aggregate"]["n_folds"] >= 2
+    assert (tmp_path / "walk_forward_folds.csv").exists()
+
+
+def test_complete_run_writes_holdout_and_figures(tmp_path):
+    close, volume, index = _prices()
+    config = RunConfig(
+        output_dir=str(tmp_path),
+        n_estimators=25,
+        hmm_iter=15,
+        min_regime_rows=40,
+        shap_rows=40,
+        lstm=False,
+        top_n=2,
+    )
+    config.complete()
+    metrics = run_from_frames(close, volume, index, config)
+    assert "walk_forward" in metrics
+    assert "regime_switching" in metrics
+    assert (tmp_path / "rc_shap.csv").exists()
+    assert (tmp_path / "figures").is_dir()
+    assert metrics.get("figures_written")
